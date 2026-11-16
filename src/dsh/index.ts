@@ -42,7 +42,7 @@ const LOOPBACK_HOST_RE = /^(?:127\.\d+\.\d+\.\d+|localhost|\[::1\]|::1)(?::\d+)?
 
 function isLoopbackRequest(req: IncomingMessage): boolean {
   const host = String(req.headers.host ?? '');
-  if (host && !LOOPBACK_HOST_RE.test(host)) return false;
+  if (!host || !LOOPBACK_HOST_RE.test(host)) return false;
   const origin = req.headers.origin;
   if (typeof origin === 'string' && origin.length > 0 && !LOOPBACK_ORIGIN_RE.test(origin)) {
     return false;
@@ -51,6 +51,7 @@ function isLoopbackRequest(req: IncomingMessage): boolean {
 }
 
 function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
+  if (res.writableEnded || res.destroyed) return;
   const payload = JSON.stringify(body);
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -70,14 +71,13 @@ async function readJsonBody(req: IncomingMessage, limitBytes = 65_536): Promise<
       rejectBody(err);
     };
     req.on('data', (chunk: Buffer) => {
-      if (settled) return;
       total += chunk.length;
       if (total > limitBytes) {
+        req.pause();
         fail(Object.assign(new Error('request body exceeds 64KB limit'), { statusCode: 413 }));
-        req.destroy();
         return;
       }
-      chunks.push(chunk);
+      if (!settled) chunks.push(chunk);
     });
     req.on('end', () => {
       if (settled) return;
@@ -115,6 +115,9 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   const configuredPath = rawConfig.dbPath ?? '.ns-dsh/board.db';
   const resolvedDbPath = configuredPath === ':memory:' ? ':memory:' : resolve(process.cwd(), configuredPath);
   const store = new KanbanStore(resolvedDbPath);
+  ctx.effect(() => () => {
+    store.close();
+  });
 
   ctx.provide('nsBoard', store);
 
@@ -182,6 +185,9 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
             'content-type': 'text/event-stream; charset=utf-8',
             'cache-control': 'no-cache, no-transform',
             connection: 'keep-alive',
+          });
+          res.on('error', () => {
+            sseClients.delete(res);
           });
           sseClients.add(res);
           res.write(`event: board\ndata: ${JSON.stringify(store.snapshot())}\n\n`);
@@ -265,6 +271,9 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
         const snap = store.snapshot();
         if (typeof args.column === 'string' && args.column.trim()) {
           const col = args.column.trim();
+          if (!(BOARD_COLUMNS as readonly string[]).includes(col)) {
+            throw new Error(`invalid column "${col}"; expected one of ${BOARD_COLUMNS.join('|')}`);
+          }
           return {
             revision: snap.revision,
             counts: snap.counts,
@@ -351,9 +360,7 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     }),
   );
 
-  ctx.effect(() => () => {
-    store.close();
-  });
+  return;
 }
 
 export const defaultDbRelativePath = join('.ns-dsh', 'board.db');

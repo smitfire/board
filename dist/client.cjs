@@ -43,7 +43,9 @@ window.__ModuleLoader__.load({
             try {
               const parsed = JSON.parse(ev.data);
               if (active) setSnap(parsed);
-            } catch {}
+            } catch (e) {
+              console.error("invalid board SSE payload", e);
+            }
           });
           return () => {
             active = false;
@@ -53,18 +55,29 @@ window.__ModuleLoader__.load({
         return () => { active = false; };
       }, []);
 
-      return { snap, err, refresh: () => {
-        fetch("/ns-board/api/state").then((r) => r.json()).then(setSnap).catch(() => {});
+      return { snap, err, setErr, refresh: () => {
+        fetch("/ns-board/api/state")
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+          .then((data) => { setSnap(data); setErr(null); })
+          .catch((e) => setErr(e && e.message ? e.message : String(e)));
       } };
     }
 
-    async function postMove(payload, onDone) {
-      await fetch("/ns-board/api/move", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      if (onDone) onDone();
+    async function postMove(payload, state) {
+      try {
+        const res = await fetch("/ns-board/api/move", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const outcome = await res.json();
+        if (!res.ok || !outcome.ok) {
+          throw new Error(outcome.reason || outcome.error || ("HTTP " + res.status));
+        }
+        if (state.refresh) state.refresh();
+      } catch (e) {
+        if (state.setErr) state.setErr(e && e.message ? e.message : String(e));
+      }
     }
 
     function KanbanSidebarIcon(props) {
@@ -155,22 +168,22 @@ window.__ModuleLoader__.load({
                         children: [
                           c.approvalNeeded ? jsx("button", {
                             type: "button",
-                            onClick: () => postMove({ cardId: c.id, toColumn: "in_progress", actor: "human", role: "human", clearApproval: true, expectedRevision: c.revision, reason: "Authorized in WebUI" }, state.refresh),
+                            onClick: () => postMove({ cardId: c.id, toColumn: "in_progress", actor: "human", role: "human", clearApproval: true, expectedRevision: c.revision, reason: "Authorized in WebUI" }, state),
                             children: "Authorize"
                           }) : null,
                           col.id === "review" ? jsx("button", {
                             type: "button",
-                            onClick: () => postMove({ cardId: c.id, toColumn: "done", actor: "human", role: "human", expectedRevision: c.revision, reason: "Approved in WebUI" }, state.refresh),
+                            onClick: () => postMove({ cardId: c.id, toColumn: "done", actor: "human", role: "human", expectedRevision: c.revision, reason: "Approved in WebUI" }, state),
                             children: "Approve"
                           }) : null,
                           col.id !== "ready" && col.id !== "done" ? jsx("button", {
                             type: "button",
-                            onClick: () => postMove({ cardId: c.id, toColumn: "ready", actor: "human", role: "human", clearApproval: true, expectedRevision: c.revision, reason: "Requeued in WebUI" }, state.refresh),
+                            onClick: () => postMove({ cardId: c.id, toColumn: "ready", actor: "human", role: "human", clearApproval: true, expectedRevision: c.revision, reason: "Requeued in WebUI" }, state),
                             children: "Requeue"
                           }) : null,
                           col.id !== "blocked" && col.id !== "done" ? jsx("button", {
                             type: "button",
-                            onClick: () => postMove({ cardId: c.id, toColumn: "blocked", actor: "human", role: "human", expectedRevision: c.revision, reason: "Blocked in WebUI" }, state.refresh),
+                            onClick: () => postMove({ cardId: c.id, toColumn: "blocked", actor: "human", role: "human", expectedRevision: c.revision, reason: "Blocked in WebUI" }, state),
                             children: "Block"
                           }) : null
                         ]

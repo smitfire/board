@@ -97,9 +97,13 @@ function normalizeScope(raw: string): string {
 }
 
 export function scopesOverlap(aRaw: string, bRaw: string): boolean {
-  const a = aRaw.replace(/\/+$/, '');
-  const b = bRaw.replace(/\/+$/, '');
-  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  try {
+    const a = normalizeScope(aRaw);
+    const b = normalizeScope(bRaw);
+    return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  } catch {
+    return false;
+  }
 }
 
 export class KanbanStore {
@@ -230,7 +234,7 @@ export class KanbanStore {
     for (const c of existingCards) depsMap.set(c.id, c.blockedBy);
     depsMap.set(candidateId, [...blockedBy]);
 
-    // Check whether following outgoing blockedBy edges from candidateId reaches candidateId again.
+    // Full-graph cycle detection so downstream->upstream edges cannot close a cycle either.
     const visiting = new Set<string>();
     const visited = new Set<string>();
     const dfs = (node: string): boolean => {
@@ -244,7 +248,10 @@ export class KanbanStore {
       visited.add(node);
       return false;
     };
-    return dfs(candidateId);
+    for (const node of depsMap.keys()) {
+      if (dfs(node)) return true;
+    }
+    return false;
   }
 
   private computeConflicts(
@@ -483,10 +490,11 @@ export class KanbanStore {
     this.withTx(() => {
       const rows = this.db.prepare('SELECT * FROM cards').all() as Array<Record<string, unknown>>;
       const cards = rows.map((r) => this.rowToCard(r));
-      const target =
-        (req.cardId ? cards.find((c) => c.id === req.cardId) : undefined) ??
-        (req.agentSessionId ? cards.find((c) => c.agentSessionId === req.agentSessionId && c.column === 'in_progress') : undefined) ??
-        cards.find((c) => c.column === 'in_progress');
+      const target = req.cardId
+        ? cards.find((c) => c.id === req.cardId)
+        : req.agentSessionId
+          ? cards.find((c) => c.agentSessionId === req.agentSessionId && c.column === 'in_progress')
+          : undefined;
 
       const now = Date.now();
       const badge: ApprovalBadge = { toolName: req.toolName, reason: req.reason.slice(0, 500), requestedAt: now };

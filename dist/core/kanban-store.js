@@ -11,9 +11,14 @@ function normalizeScope(raw) {
     return s;
 }
 export function scopesOverlap(aRaw, bRaw) {
-    const a = aRaw.replace(/\/+$/, '');
-    const b = bRaw.replace(/\/+$/, '');
-    return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    try {
+        const a = normalizeScope(aRaw);
+        const b = normalizeScope(bRaw);
+        return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    }
+    catch {
+        return false;
+    }
 }
 export class KanbanStore {
     dbPath;
@@ -143,7 +148,7 @@ export class KanbanStore {
         for (const c of existingCards)
             depsMap.set(c.id, c.blockedBy);
         depsMap.set(candidateId, [...blockedBy]);
-        // Check whether following outgoing blockedBy edges from candidateId reaches candidateId again.
+        // Full-graph cycle detection so downstream->upstream edges cannot close a cycle either.
         const visiting = new Set();
         const visited = new Set();
         const dfs = (node) => {
@@ -160,7 +165,11 @@ export class KanbanStore {
             visited.add(node);
             return false;
         };
-        return dfs(candidateId);
+        for (const node of depsMap.keys()) {
+            if (dfs(node))
+                return true;
+        }
+        return false;
     }
     computeConflicts(cardId, writeScopes, allCards) {
         if (writeScopes.length === 0)
@@ -350,9 +359,11 @@ export class KanbanStore {
         this.withTx(() => {
             const rows = this.db.prepare('SELECT * FROM cards').all();
             const cards = rows.map((r) => this.rowToCard(r));
-            const target = (req.cardId ? cards.find((c) => c.id === req.cardId) : undefined) ??
-                (req.agentSessionId ? cards.find((c) => c.agentSessionId === req.agentSessionId && c.column === 'in_progress') : undefined) ??
-                cards.find((c) => c.column === 'in_progress');
+            const target = req.cardId
+                ? cards.find((c) => c.id === req.cardId)
+                : req.agentSessionId
+                    ? cards.find((c) => c.agentSessionId === req.agentSessionId && c.column === 'in_progress')
+                    : undefined;
             const now = Date.now();
             const badge = { toolName: req.toolName, reason: req.reason.slice(0, 500), requestedAt: now };
             if (target) {

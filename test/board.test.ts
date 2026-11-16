@@ -28,8 +28,9 @@ test('KanbanStore enforces 6-column DAG acyclicity, auto-unblocking, writeScopes
     });
     assert.equal(b.card.column, 'backlog');
 
-    // Cycle A -> B -> A must be rejected cleanly
-    assert.throws(() => store.addDependency('card-a', 'card-b'), /DAG cycle rejected/);
+    // Transitive cycle (A -> B -> D -> A) must also be rejected cleanly
+    store.proposeCard({ id: 'card-d', title: 'Deploy', blockedBy: ['card-b'], writeScopes: ['deploy'] });
+    assert.throws(() => store.addDependency('card-a', 'card-d'), /DAG cycle rejected/);
 
     // Cannot move blocked dependency card directly to in_progress before parent is done
     const blockedMove = store.moveCard({ cardId: 'card-b', toColumn: 'in_progress', actor: 'worker' });
