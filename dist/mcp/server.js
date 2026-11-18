@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
-import { KanbanStore } from '../core/index.js';
+import { KanbanStore, } from '../core/index.js';
 const MCP_TOOLS = [
     { name: 'board_view', description: 'Inspect current Kanban & DAG cards.', inputSchema: { type: 'object', properties: { column: { type: 'string' } } } },
     {
@@ -16,6 +16,8 @@ const MCP_TOOLS = [
                 title: { type: 'string' },
                 description: { type: 'string' },
                 owner: { type: 'string' },
+                modelTier: { type: 'string' },
+                phase: { type: 'string' },
                 writeScopes: { type: 'array', items: { type: 'string' } },
                 blockedBy: { type: 'array', items: { type: 'string' } },
             },
@@ -33,6 +35,8 @@ const MCP_TOOLS = [
                 actor: { type: 'string' },
                 reason: { type: 'string' },
                 expectedRevision: { type: 'integer' },
+                modelTier: { type: 'string' },
+                phase: { type: 'string' },
                 clearApproval: { type: 'boolean' },
             },
             required: ['cardId', 'toColumn'],
@@ -100,6 +104,8 @@ export async function startMcpServer(workspaceRoot = process.cwd()) {
                         title: String(args.title ?? ''),
                         description: typeof args.description === 'string' ? args.description : undefined,
                         owner: typeof args.owner === 'string' ? args.owner : 'mcp',
+                        modelTier: typeof args.modelTier === 'string' ? args.modelTier : undefined,
+                        phase: typeof args.phase === 'string' ? args.phase : undefined,
                         writeScopes: Array.isArray(args.writeScopes) ? args.writeScopes.map(String) : undefined,
                         blockedBy: Array.isArray(args.blockedBy) ? args.blockedBy.map(String) : undefined,
                     });
@@ -111,6 +117,8 @@ export async function startMcpServer(workspaceRoot = process.cwd()) {
                         actor: typeof args.actor === 'string' ? args.actor : 'mcp',
                         reason: typeof args.reason === 'string' ? args.reason : undefined,
                         expectedRevision: typeof args.expectedRevision === 'number' ? args.expectedRevision : undefined,
+                        modelTier: typeof args.modelTier === 'string' ? args.modelTier : undefined,
+                        phase: typeof args.phase === 'string' ? args.phase : undefined,
                         clearApproval: args.clearApproval === true,
                     });
                 }

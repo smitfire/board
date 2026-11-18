@@ -13,6 +13,8 @@ import {
   type BoardColumn,
   type BoardRole,
   type BoardStateSnapshot,
+  type CardExecPhase,
+  type CardModelTier,
   type CommentKind,
 } from '../core/index.js';
 
@@ -104,15 +106,17 @@ export function formatBoardText(snap: BoardStateSnapshot): string {
     for (const c of items) {
       const deps = c.blockedBy.length > 0 ? ` blockedBy=[${c.blockedBy.join(',')}]` : '';
       const scopes = c.writeScopes.length > 0 ? ` scopes=[${c.writeScopes.join(',')}]` : '';
+      const tier = c.modelTier ? ` tier=${c.modelTier}` : '';
+      const phase = c.phase ? ` phase=${c.phase}` : '';
       const hitl = c.approvalNeeded ? ` APPROVAL(${c.approvalNeeded.toolName})` : '';
-      lines.push(`  - ${c.id}@r${c.revision} (${c.owner})${hitl}: ${c.title}${deps}${scopes}`);
+      lines.push(`  - ${c.id}@r${c.revision} (${c.owner}${tier}${phase})${hitl}: ${c.title}${deps}${scopes}`);
     }
   }
   return lines.join('\n');
 }
 
 export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void {
-  const configuredPath = rawConfig.dbPath ?? '.ns-dsh/board.db';
+  const configuredPath = process.env.NS_BOARD_DB_PATH?.trim() || rawConfig.dbPath || '.ns-dsh/board.db';
   const resolvedDbPath = configuredPath === ':memory:' ? ':memory:' : resolve(process.cwd(), configuredPath);
   const store = new KanbanStore(resolvedDbPath);
   ctx.effect(() => () => {
@@ -209,6 +213,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
               title: String(body.title ?? ''),
               description: typeof body.description === 'string' ? body.description : undefined,
               owner: typeof body.owner === 'string' ? body.owner : 'human',
+              modelTier: typeof body.modelTier === 'string' ? (body.modelTier as CardModelTier) : undefined,
+              phase: typeof body.phase === 'string' ? (body.phase as CardExecPhase) : undefined,
               writeScopes: Array.isArray(body.writeScopes) ? body.writeScopes.map(String) : undefined,
               blockedBy: Array.isArray(body.blockedBy) ? body.blockedBy.map(String) : undefined,
             });
@@ -234,6 +240,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
               role: typeof body.role === 'string' ? (body.role as BoardRole) : 'human',
               reason: typeof body.reason === 'string' ? body.reason : undefined,
               expectedRevision: typeof body.expectedRevision === 'number' ? body.expectedRevision : undefined,
+              modelTier: typeof body.modelTier === 'string' ? (body.modelTier as CardModelTier) : undefined,
+              phase: typeof body.phase === 'string' ? (body.phase as CardExecPhase) : undefined,
               clearApproval: body.clearApproval === true,
             });
             sendJson(res, outcome.ok ? 200 : outcome.status === 'conflict' ? 409 : 400, outcome);
@@ -294,6 +302,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
         title: { type: 'string', required: true, description: 'Short task title.' },
         description: { type: 'string', description: 'Acceptance criteria & context.' },
         owner: { type: 'string', description: 'Assigned worker/role.' },
+        modelTier: { type: 'string', description: 'Optional model tier: efficient|capable.' },
+        phase: { type: 'string', description: 'Optional execution phase: planning|executing|review|done.' },
         writeScopes: { type: 'json', description: 'Relative files/directories the card may modify.' },
         blockedBy: { type: 'json', description: 'Array of prerequisite card ids.' },
       },
@@ -305,6 +315,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
           description: typeof args.description === 'string' ? args.description : undefined,
           owner: typeof args.owner === 'string' ? args.owner : 'orchestrator',
           agentSessionId: exec.agent ? String(exec.agent.session.id) : undefined,
+          modelTier: typeof args.modelTier === 'string' ? (args.modelTier as CardModelTier) : undefined,
+          phase: typeof args.phase === 'string' ? (args.phase as CardExecPhase) : undefined,
           writeScopes: Array.isArray(args.writeScopes) ? args.writeScopes.map(String) : undefined,
           blockedBy: Array.isArray(args.blockedBy) ? args.blockedBy.map(String) : undefined,
         }) as never,
@@ -321,6 +333,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
         actor: { type: 'string', description: 'Actor identifier (default worker).' },
         reason: { type: 'string', description: 'Reason or evidence note.' },
         expectedRevision: { type: 'integer', description: 'Optional optimistic CAS revision.' },
+        modelTier: { type: 'string', description: 'Optional model tier: efficient|capable.' },
+        phase: { type: 'string', description: 'Optional execution phase: planning|executing|review|done.' },
         clearApproval: { type: 'boolean', description: 'Clear active approval badge.' },
       },
       output: { schema: schemaObj, render: renderJson },
@@ -332,6 +346,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
           reason: typeof args.reason === 'string' ? args.reason : undefined,
           expectedRevision: typeof args.expectedRevision === 'number' ? args.expectedRevision : undefined,
           agentSessionId: exec.agent ? String(exec.agent.session.id) : undefined,
+          modelTier: typeof args.modelTier === 'string' ? (args.modelTier as CardModelTier) : undefined,
+          phase: typeof args.phase === 'string' ? (args.phase as CardExecPhase) : undefined,
           clearApproval: args.clearApproval === true,
         }) as never,
     }),

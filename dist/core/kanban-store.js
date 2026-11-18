@@ -3,6 +3,24 @@ import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname, posix, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 export const BOARD_COLUMNS = ['backlog', 'ready', 'in_progress', 'review', 'done', 'blocked'];
+export const CARD_MODEL_TIERS = ['efficient', 'capable'];
+export const CARD_EXEC_PHASES = ['planning', 'executing', 'review', 'done'];
+function normalizeModelTier(raw) {
+    if (raw === undefined || raw === null || raw === '')
+        return undefined;
+    const val = String(raw).trim();
+    if (CARD_MODEL_TIERS.includes(val))
+        return val;
+    throw new Error(`invalid modelTier "${val}"; expected efficient|capable`);
+}
+function normalizeExecPhase(raw) {
+    if (raw === undefined || raw === null || raw === '')
+        return undefined;
+    const val = String(raw).trim();
+    if (CARD_EXEC_PHASES.includes(val))
+        return val;
+    throw new Error(`invalid phase "${val}"; expected planning|executing|review|done`);
+}
 function normalizeScope(raw) {
     const s = posix.normalize(raw.replace(/\\/g, '/').trim()).replace(/^\.\//, '').replace(/\/+$/, '');
     if (!s || s === '.' || s === '..' || s.startsWith('../') || s.startsWith('/')) {
@@ -56,6 +74,8 @@ export class KanbanStore {
         revision INTEGER NOT NULL DEFAULT 1,
         owner TEXT NOT NULL DEFAULT '',
         agent_session_id TEXT,
+        model_tier TEXT,
+        phase TEXT,
         write_scopes_json TEXT NOT NULL DEFAULT '[]',
         blocked_by_json TEXT NOT NULL DEFAULT '[]',
         approval_json TEXT,
@@ -73,6 +93,13 @@ export class KanbanStore {
         created_at INTEGER NOT NULL
       );
     `);
+        const existingCols = new Set(db.prepare('PRAGMA table_info(cards)').all().map((r) => String(r.name)));
+        if (!existingCols.has('model_tier')) {
+            db.exec('ALTER TABLE cards ADD COLUMN model_tier TEXT');
+        }
+        if (!existingCols.has('phase')) {
+            db.exec('ALTER TABLE cards ADD COLUMN phase TEXT');
+        }
         return db;
     }
     safeJson(raw, fallback) {
@@ -86,6 +113,12 @@ export class KanbanStore {
         }
     }
     rowToCard(row) {
+        const rawTier = typeof row.model_tier === 'string' && CARD_MODEL_TIERS.includes(row.model_tier)
+            ? row.model_tier
+            : undefined;
+        const rawPhase = typeof row.phase === 'string' && CARD_EXEC_PHASES.includes(row.phase)
+            ? row.phase
+            : undefined;
         return {
             id: String(row.id),
             title: String(row.title),
@@ -94,12 +127,25 @@ export class KanbanStore {
             revision: Number(row.revision ?? 1),
             owner: String(row.owner ?? ''),
             agentSessionId: row.agent_session_id ? String(row.agent_session_id) : undefined,
+            ...(rawTier ? { modelTier: rawTier } : {}),
+            ...(rawPhase ? { phase: rawPhase } : {}),
             writeScopes: this.safeJson(row.write_scopes_json, []),
             blockedBy: this.safeJson(row.blocked_by_json, []),
             approvalNeeded: this.safeJson(row.approval_json, null),
             reviewFindings: Number(row.review_findings ?? 0),
             createdAt: Number(row.created_at ?? 0),
             updatedAt: Number(row.updated_at ?? 0),
+        };
+    }
+    rowToComment(row) {
+        return {
+            id: Number(row.id),
+            cardId: String(row.card_id),
+            author: String(row.author),
+            role: String(row.role),
+            kind: String(row.kind),
+            body: String(row.body),
+            createdAt: Number(row.created_at),
         };
     }
     withTx(fn) {
@@ -190,6 +236,8 @@ export class KanbanStore {
         if (!title)
             throw new Error('card title must be non-empty');
         const id = (input.id?.trim() || `card_${randomUUID().slice(0, 8)}`).replace(/[^A-Za-z0-9_.:-]/g, '_');
+        const modelTier = normalizeModelTier(input.modelTier);
+        const phase = normalizeExecPhase(input.phase);
         const writeScopes = [...new Set((input.writeScopes ?? []).map(normalizeScope))];
         const blockedBy = [...new Set((input.blockedBy ?? []).map((b) => b.trim()).filter(Boolean))];
         if (blockedBy.includes(id))
@@ -213,9 +261,9 @@ export class KanbanStore {
             const col = hasUnmetDeps ? 'backlog' : (input.initialColumn ?? 'ready');
             const now = Date.now();
             this.db
-                .prepare(`INSERT INTO cards (id, title, description, col, revision, owner, agent_session_id, write_scopes_json, blocked_by_json, approval_json, review_findings, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, 0, ?, ?)`)
-                .run(id, title.slice(0, 160), (input.description ?? '').trim().slice(0, 4000), col, (input.owner ?? 'unassigned').slice(0, 80), input.agentSessionId ?? null, JSON.stringify(writeScopes), JSON.stringify(blockedBy), now, now);
+                .prepare(`INSERT INTO cards (id, title, description, col, revision, owner, agent_session_id, model_tier, phase, write_scopes_json, blocked_by_json, approval_json, review_findings, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)`)
+                .run(id, title.slice(0, 160), (input.description ?? '').trim().slice(0, 4000), col, (input.owner ?? 'unassigned').slice(0, 80), input.agentSessionId ?? null, modelTier ?? null, phase ?? null, JSON.stringify(writeScopes), JSON.stringify(blockedBy), now, now);
             this.bumpBoardRev(now);
             outCard = this.rowToCard(this.db.prepare('SELECT * FROM cards WHERE id = ?').get(id));
             conflicts = this.computeConflicts(id, writeScopes, allCards);
@@ -255,6 +303,15 @@ export class KanbanStore {
         if (!BOARD_COLUMNS.includes(input.toColumn)) {
             return { ok: false, status: 'invalid', reason: `invalid column "${String(input.toColumn)}"` };
         }
+        let reqTier;
+        let reqPhase;
+        try {
+            reqTier = normalizeModelTier(input.modelTier);
+            reqPhase = normalizeExecPhase(input.phase);
+        }
+        catch (err) {
+            return { ok: false, status: 'invalid', reason: err instanceof Error ? err.message : String(err) };
+        }
         let outcome;
         let shouldEmit = false;
         this.withTx(() => {
@@ -290,11 +347,19 @@ export class KanbanStore {
             const now = Date.now();
             const nextApproval = input.clearApproval ? null : card.approvalNeeded;
             const nextFindings = input.reviewFindings ?? card.reviewFindings;
+            const nextTier = input.modelTier !== undefined ? reqTier : card.modelTier;
+            const nextPhase = input.phase !== undefined
+                ? reqPhase
+                : input.toColumn === 'done' && card.phase
+                    ? 'done'
+                    : input.toColumn === 'review' && card.phase
+                        ? 'review'
+                        : card.phase;
             this.db
                 .prepare(`UPDATE cards
-           SET col = ?, revision = revision + 1, owner = ?, agent_session_id = ?, approval_json = ?, review_findings = ?, updated_at = ?
+           SET col = ?, revision = revision + 1, owner = ?, agent_session_id = ?, model_tier = ?, phase = ?, approval_json = ?, review_findings = ?, updated_at = ?
            WHERE id = ?`)
-                .run(input.toColumn, input.owner ?? card.owner, input.agentSessionId !== undefined ? input.agentSessionId : card.agentSessionId ?? null, nextApproval ? JSON.stringify(nextApproval) : null, nextFindings, now, card.id);
+                .run(input.toColumn, input.owner ?? card.owner, input.agentSessionId !== undefined ? input.agentSessionId : card.agentSessionId ?? null, nextTier ?? null, nextPhase ?? null, nextApproval ? JSON.stringify(nextApproval) : null, nextFindings, now, card.id);
             if (input.reason?.trim()) {
                 this.db
                     .prepare('INSERT INTO comments (card_id, author, role, kind, body, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -327,6 +392,33 @@ export class KanbanStore {
             this.emitChange();
         return outcome;
     }
+    /**
+     * Update execution phase, modelTier, owner, or session binding without changing column.
+     */
+    updateCardMeta(cardId, patch) {
+        const nextTier = patch.modelTier !== undefined ? normalizeModelTier(patch.modelTier) : undefined;
+        const nextPhase = patch.phase !== undefined ? normalizeExecPhase(patch.phase) : undefined;
+        let updated;
+        let changed = false;
+        this.withTx(() => {
+            const row = this.db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId);
+            if (!row)
+                return;
+            const card = this.rowToCard(row);
+            const now = Date.now();
+            this.db
+                .prepare(`UPDATE cards
+           SET model_tier = ?, phase = ?, owner = ?, agent_session_id = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ?`)
+                .run(patch.modelTier !== undefined ? (nextTier ?? null) : (card.modelTier ?? null), patch.phase !== undefined ? (nextPhase ?? null) : (card.phase ?? null), patch.owner !== undefined ? patch.owner.slice(0, 80) : card.owner, patch.agentSessionId !== undefined ? patch.agentSessionId : (card.agentSessionId ?? null), now, card.id);
+            this.bumpBoardRev(now);
+            updated = this.rowToCard(this.db.prepare('SELECT * FROM cards WHERE id = ?').get(card.id));
+            changed = true;
+        });
+        if (changed)
+            this.emitChange();
+        return updated;
+    }
     addComment(input) {
         if (!input.body?.trim())
             throw new Error('comment body must be non-empty');
@@ -341,15 +433,7 @@ export class KanbanStore {
                 .run(input.cardId, input.author, input.role ?? 'system', input.kind ?? 'note', input.body.trim().slice(0, 4000), now);
             this.bumpBoardRev(now);
             const row = this.db.prepare('SELECT * FROM comments WHERE id = ?').get(Number(info.lastInsertRowid));
-            comment = {
-                id: Number(row.id),
-                cardId: String(row.card_id),
-                author: String(row.author),
-                role: String(row.role),
-                kind: String(row.kind),
-                body: String(row.body),
-                createdAt: Number(row.created_at),
-            };
+            comment = this.rowToComment(row);
         });
         this.emitChange();
         return comment;
@@ -402,6 +486,15 @@ export class KanbanStore {
         const row = this.db.prepare('SELECT * FROM cards WHERE id = ?').get(id);
         return row ? this.rowToCard(row) : undefined;
     }
+    /**
+     * Return all comments for a card in chronological order.
+     */
+    getComments(cardId) {
+        const rows = this.db
+            .prepare('SELECT * FROM comments WHERE card_id = ? ORDER BY id ASC')
+            .all(cardId);
+        return rows.map((r) => this.rowToComment(r));
+    }
     snapshot() {
         const meta = this.db.prepare('SELECT revision, updated_at FROM board_meta WHERE id = 1').get();
         const cardRows = this.db.prepare('SELECT * FROM cards ORDER BY updated_at DESC').all();
@@ -421,15 +514,7 @@ export class KanbanStore {
         const commentRows = this.db
             .prepare('SELECT * FROM comments ORDER BY id DESC LIMIT 20')
             .all();
-        const recentComments = commentRows.map((r) => ({
-            id: Number(r.id),
-            cardId: String(r.card_id),
-            author: String(r.author),
-            role: String(r.role),
-            kind: String(r.kind),
-            body: String(r.body),
-            createdAt: Number(r.created_at),
-        }));
+        const recentComments = commentRows.map((r) => this.rowToComment(r));
         return {
             revision: Number(meta?.revision ?? 1),
             updatedAt: Number(meta?.updated_at ?? 0),
@@ -442,13 +527,18 @@ export class KanbanStore {
         const snap = this.snapshot();
         if (snap.cards.length === 0)
             return '';
+        const active = snap.cards
+            .filter((c) => c.column === 'in_progress' || c.column === 'review')
+            .slice(0, 3)
+            .map((c) => `${c.id}(${c.column}${c.phase ? `/${c.phase}` : ''}${c.modelTier ? `:${c.modelTier}` : ''})`)
+            .join(', ');
         const alerts = snap.cards
             .filter((c) => c.approvalNeeded || c.column === 'review' || c.column === 'blocked')
             .slice(0, 3)
             .map((c) => `${c.id}(${c.column}${c.approvalNeeded ? ':APPROVAL' : ''})`)
             .join(', ');
         const summary = `backlog:${snap.counts.backlog} ready:${snap.counts.ready} in_progress:${snap.counts.in_progress} review:${snap.counts.review} done:${snap.counts.done} blocked:${snap.counts.blocked}`;
-        return `<ns-board rev="${snap.revision}" summary="${summary}"${alerts ? ` attention="${alerts}"` : ''} />`;
+        return `<ns-board rev="${snap.revision}" summary="${summary}"${active ? ` active="${active}"` : ''}${alerts ? ` attention="${alerts}"` : ''} />`;
     }
     close() {
         this.db.close();

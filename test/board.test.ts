@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import * as vm from 'node:vm';
 import { Context } from '@deepseek-ai/cordis';
 import ToolsService from '@deepseek-ai/dsh-tools';
@@ -158,6 +159,93 @@ test('DSH Cordis plugin serves /ns-board API routes, /board command, and client 
   } finally {
     await fiber.dispose();
     await wsFiber.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('KanbanStore tracks modelTier, phase, updateCardMeta, getComments, legacy SQLite migration, and NS_BOARD_DB_PATH', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ns-board-tier-'));
+  const legacyDbPath = join(dir, 'legacy.db');
+  const legacy = new DatabaseSync(legacyDbPath);
+  legacy.exec(`
+    CREATE TABLE board_meta (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
+    INSERT INTO board_meta (id, revision, updated_at) VALUES (1, 1, 100);
+    CREATE TABLE cards (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      col TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      owner TEXT NOT NULL DEFAULT '',
+      agent_session_id TEXT,
+      write_scopes_json TEXT NOT NULL DEFAULT '[]',
+      blocked_by_json TEXT NOT NULL DEFAULT '[]',
+      approval_json TEXT,
+      review_findings INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_id TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+      author TEXT NOT NULL,
+      role TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    INSERT INTO cards (id, title, description, col, revision, owner, created_at, updated_at)
+    VALUES ('legacy-1', 'Old row', '', 'ready', 1, 'coder', 100, 100);
+  `);
+  legacy.close();
+
+  const store = new KanbanStore(legacyDbPath);
+  try {
+    assert.equal(store.getCard('legacy-1')?.title, 'Old row');
+    assert.throws(() => store.proposeCard({ id: 'bad-tier', title: 'Bad', modelTier: 'ultra' as never }), /invalid modelTier/);
+
+    const metaUpdated = store.updateCardMeta('legacy-1', { modelTier: 'capable', phase: 'planning', owner: 'orchestrator' });
+    assert.equal(metaUpdated?.modelTier, 'capable');
+    assert.equal(metaUpdated?.phase, 'planning');
+    assert.equal(store.updateCardMeta('missing-card', { phase: 'done' }), undefined);
+
+    const p = store.proposeCard({ id: 'tiered-1', title: 'Mechanical change', modelTier: 'efficient', phase: 'executing', writeScopes: ['src/a.ts'] });
+    assert.equal(p.card.modelTier, 'efficient');
+    assert.equal(p.card.phase, 'executing');
+
+    const badMove = store.moveCard({ cardId: 'tiered-1', toColumn: 'in_progress', actor: 'orch', phase: 'bogus' as never });
+    assert.equal(badMove.status, 'invalid');
+
+    store.moveCard({ cardId: 'tiered-1', toColumn: 'in_progress', actor: 'orch', role: 'orchestrator', reason: 'Start work' });
+    assert.match(store.digest(), /tiered-1\(in_progress\/executing:efficient\)/);
+    store.addComment({ cardId: 'tiered-1', author: 'orch', role: 'orchestrator', kind: 'plan', body: 'Plan recorded' });
+    const comments = store.getComments('tiered-1');
+    assert.equal(comments.length, 2);
+    assert.equal(comments[1].kind, 'plan');
+
+    const revMove = store.moveCard({ cardId: 'tiered-1', toColumn: 'done', actor: 'reviewer', role: 'reviewer' });
+    assert.equal(revMove.card?.phase, 'done');
+  } finally {
+    store.close();
+  }
+
+  const prevOverride = process.env.NS_BOARD_DB_PATH;
+  process.env.NS_BOARD_DB_PATH = ':memory:';
+  const ctx = new Context();
+  await ctx.plugin(SystemPrompt);
+  await ctx.plugin(ToolsService);
+  await ctx.plugin(CommandRuntime);
+  const fiber = ctx.plugin(boardPlugin, { dbPath: join(dir, 'should-not-create.db') });
+  await fiber;
+  try {
+    ctx.nsBoard!.proposeCard({ id: 'mem-1', title: 'Mem tier card', modelTier: 'capable', phase: 'planning' });
+    const text = boardPlugin.formatBoardText(ctx.nsBoard!.snapshot());
+    assert.match(text, /tier=capable/);
+    assert.match(text, /phase=planning/);
+  } finally {
+    await fiber.dispose();
+    if (prevOverride === undefined) delete process.env.NS_BOARD_DB_PATH;
+    else process.env.NS_BOARD_DB_PATH = prevOverride;
     rmSync(dir, { recursive: true, force: true });
   }
 });
