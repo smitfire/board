@@ -1,5 +1,9 @@
 export declare const BOARD_COLUMNS: readonly ["backlog", "ready", "in_progress", "review", "done", "blocked"];
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
+export declare const CARD_MODEL_TIERS: readonly ["efficient", "capable"];
+export type CardModelTier = (typeof CARD_MODEL_TIERS)[number];
+export declare const CARD_EXEC_PHASES: readonly ["planning", "executing", "review", "done"];
+export type CardExecPhase = (typeof CARD_EXEC_PHASES)[number];
 export type BoardRole = 'human' | 'orchestrator' | 'worker' | 'advisor' | 'reviewer' | 'cuga' | 'system';
 export type CommentKind = 'note' | 'plan' | 'review' | 'approval' | 'conflict' | 'status';
 export interface ApprovalBadge {
@@ -15,6 +19,8 @@ export interface BoardCard {
     revision: number;
     owner: string;
     agentSessionId?: string;
+    modelTier?: CardModelTier;
+    phase?: CardExecPhase;
     writeScopes: string[];
     blockedBy: string[];
     approvalNeeded: ApprovalBadge | null;
@@ -49,6 +55,8 @@ export interface ProposeCardInput {
     description?: string;
     owner?: string;
     agentSessionId?: string;
+    modelTier?: CardModelTier;
+    phase?: CardExecPhase;
     writeScopes?: readonly string[];
     blockedBy?: readonly string[];
     initialColumn?: 'backlog' | 'ready';
@@ -62,8 +70,16 @@ export interface MoveCardInput {
     expectedRevision?: number;
     owner?: string;
     agentSessionId?: string;
+    modelTier?: CardModelTier;
+    phase?: CardExecPhase;
     reviewFindings?: number;
     clearApproval?: boolean;
+}
+export interface UpdateCardMetaInput {
+    modelTier?: CardModelTier;
+    phase?: CardExecPhase;
+    owner?: string;
+    agentSessionId?: string;
 }
 export interface MoveCardOutcome {
     ok: boolean;
@@ -82,6 +98,7 @@ export declare class KanbanStore {
     private open;
     private safeJson;
     private rowToCard;
+    private rowToComment;
     private withTx;
     private bumpBoardRev;
     private emitChange;
@@ -97,6 +114,10 @@ export declare class KanbanStore {
      */
     addDependency(cardId: string, blockedByCardId: string): BoardCard;
     moveCard(input: MoveCardInput): MoveCardOutcome;
+    /**
+     * Update execution phase, modelTier, owner, or session binding without changing column.
+     */
+    updateCardMeta(cardId: string, patch: UpdateCardMetaInput): BoardCard | undefined;
     addComment(input: {
         cardId: string;
         author: string;
@@ -112,6 +133,10 @@ export declare class KanbanStore {
     }): BoardCard;
     activeWriteScopesForSession(sessionId: string): string[] | undefined;
     getCard(id: string): BoardCard | undefined;
+    /**
+     * Return all comments for a card in chronological order.
+     */
+    getComments(cardId: string): BoardComment[];
     snapshot(): BoardStateSnapshot;
     digest(): string;
     close(): void;

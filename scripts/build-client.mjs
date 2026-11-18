@@ -99,6 +99,10 @@ const CLIENT_BUNDLE = `window.__ModuleLoader__.load({
       if (!snap || !snap.cards || snap.cards.length === 0) return null;
       const counts = snap.counts || {};
       const attention = snap.cards.filter((c) => c.approvalNeeded || c.column === "blocked" || c.column === "review").length;
+      const activePhaseCards = snap.cards.filter((c) => c.column === "in_progress" || c.column === "review");
+      const capableActive = activePhaseCards.filter((c) => c.modelTier === "capable").length;
+      const planningActive = activePhaseCards.filter((c) => c.phase === "planning").length;
+      const phaseBadge = planningActive > 0 ? " · planning:" + planningActive : (capableActive > 0 ? " · capable:" + capableActive : "");
       return jsxs("div", {
         "data-ns-board-dock": true,
         style: {
@@ -112,7 +116,7 @@ const CLIENT_BUNDLE = `window.__ModuleLoader__.load({
         },
         children: [
           jsx("span", {
-            children: "Kanban rev " + snap.revision + " · ready:" + (counts.ready || 0) + " active:" + (counts.in_progress || 0) + " review:" + (counts.review || 0) + " done:" + (counts.done || 0) + (attention ? " · " + attention + " attention" : "")
+            children: "Kanban rev " + snap.revision + " · ready:" + (counts.ready || 0) + " active:" + (counts.in_progress || 0) + " review:" + (counts.review || 0) + " done:" + (counts.done || 0) + phaseBadge + (attention ? " · " + attention + " attention" : "")
           }),
           jsx("button", {
             type: "button",
@@ -166,7 +170,22 @@ const CLIENT_BUNDLE = `window.__ModuleLoader__.load({
                     },
                     children: [
                       jsx("div", { style: { fontWeight: 600 }, children: c.title }),
-                      jsx("div", { style: { fontSize: "11px", opacity: 0.75, marginTop: "2px" }, children: c.id + " · r" + c.revision + " · " + c.owner }),
+                      jsx("div", { style: { fontSize: "11px", opacity: 0.75, marginTop: "2px" }, children: c.id + " · r" + c.revision + " · " + c.owner + (c.modelTier ? " · " + c.modelTier : "") + (c.phase ? " [" + c.phase + "]" : "") }),
+                      c.modelTier || c.phase ? jsxs("div", {
+                        style: { display: "flex", gap: "4px", marginTop: "4px", fontSize: "10px" },
+                        children: [
+                          c.modelTier ? jsx("span", {
+                            "data-card-tier": c.modelTier,
+                            style: { padding: "1px 5px", borderRadius: "4px", border: "1px solid currentColor", opacity: 0.85 },
+                            children: "tier:" + c.modelTier
+                          }) : null,
+                          c.phase ? jsx("span", {
+                            "data-card-phase": c.phase,
+                            style: { padding: "1px 5px", borderRadius: "4px", border: "1px solid currentColor", opacity: 0.85 },
+                            children: "phase:" + c.phase
+                          }) : null
+                        ]
+                      }) : null,
                       c.writeScopes && c.writeScopes.length > 0 ? jsx("div", { style: { fontSize: "11px", marginTop: "4px" }, children: "scopes: " + c.writeScopes.join(", ") }) : null,
                       c.blockedBy && c.blockedBy.length > 0 ? jsx("div", { style: { fontSize: "11px", marginTop: "2px" }, children: "blockedBy: " + c.blockedBy.join(", ") }) : null,
                       c.approvalNeeded ? jsx("div", { style: { fontSize: "11px", color: "#d97706", marginTop: "4px" }, children: "Approval: " + c.approvalNeeded.toolName + " — " + c.approvalNeeded.reason }) : null,
