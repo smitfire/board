@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -247,5 +246,37 @@ test('KanbanStore tracks modelTier, phase, updateCardMeta, getComments, legacy S
     if (prevOverride === undefined) delete process.env.NS_BOARD_DB_PATH;
     else process.env.NS_BOARD_DB_PATH = prevOverride;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ns-board defaults board.db into NS_DSH_STATE_DIR when NS_BOARD_DB_PATH is unset in a clean repo', async () => {
+  const prevCwd = process.cwd();
+  const prevBoardEnv = process.env.NS_BOARD_DB_PATH;
+  const prevStateEnv = process.env.NS_DSH_STATE_DIR;
+  const cleanCwd = mkdtempSync(join(tmpdir(), 'ns-board-clean-cwd-'));
+  const stateDir = mkdtempSync(join(tmpdir(), 'ns-board-state-dir-'));
+  delete process.env.NS_BOARD_DB_PATH;
+  process.env.NS_DSH_STATE_DIR = stateDir;
+  process.chdir(cleanCwd);
+
+  const ctx = new Context();
+  await ctx.plugin(SystemPrompt);
+  await ctx.plugin(ToolsService);
+  await ctx.plugin(CommandRuntime);
+  const fiber = ctx.plugin(boardPlugin, {});
+  await fiber;
+  try {
+    ctx.nsBoard!.proposeCard({ id: 'state-dir-1', title: 'Stored outside repo' });
+    assert.equal(existsSync(join(stateDir, 'board.db')), true);
+    assert.equal(existsSync(join(cleanCwd, '.ns-dsh')), false);
+  } finally {
+    await fiber.dispose();
+    process.chdir(prevCwd);
+    if (prevBoardEnv === undefined) delete process.env.NS_BOARD_DB_PATH;
+    else process.env.NS_BOARD_DB_PATH = prevBoardEnv;
+    if (prevStateEnv === undefined) delete process.env.NS_DSH_STATE_DIR;
+    else process.env.NS_DSH_STATE_DIR = prevStateEnv;
+    rmSync(cleanCwd, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
