@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -115,9 +116,22 @@ export function formatBoardText(snap: BoardStateSnapshot): string {
   return lines.join('\n');
 }
 
+function resolveBoardDbPath(rawConfigDbPath?: string): string {
+  const envDb = process.env.NS_BOARD_DB_PATH?.trim();
+  if (envDb) return envDb === ':memory:' ? ':memory:' : resolve(process.cwd(), envDb);
+  const cfgDb = rawConfigDbPath?.trim();
+  if (cfgDb && cfgDb !== '.ns-dsh/board.db') {
+    return cfgDb === ':memory:' ? ':memory:' : resolve(process.cwd(), cfgDb);
+  }
+  const localLegacy = resolve(process.cwd(), '.ns-dsh/board.db');
+  if (existsSync(localLegacy)) return localLegacy;
+  const stateDir = process.env.NS_DSH_STATE_DIR?.trim();
+  if (stateDir) return join(resolve(stateDir), 'board.db');
+  return localLegacy;
+}
+
 export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void {
-  const configuredPath = process.env.NS_BOARD_DB_PATH?.trim() || rawConfig.dbPath || '.ns-dsh/board.db';
-  const resolvedDbPath = configuredPath === ':memory:' ? ':memory:' : resolve(process.cwd(), configuredPath);
+  const resolvedDbPath = resolveBoardDbPath(rawConfig.dbPath);
   const store = new KanbanStore(resolvedDbPath);
   ctx.effect(() => () => {
     store.close();
